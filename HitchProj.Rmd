@@ -1,0 +1,642 @@
+---
+title: "IEP 2023 Presentation. Hitch: YBFMP's Minnow on the Rise"
+author: "Emily"
+date: '2023-03-01 '
+editor_options: 
+  chunk_output_type: console
+---
+
+# PACKAGES
+```{r}
+# load packages
+library(tidyverse) # for ggplot2
+library(lubridate) # for dates
+library(plotly) # Makes plots you can interact with, good for checking outliers
+library(ggpubr) # this is for stitching multiple plots together
+```
+
+# Datasets to read in : Make sure to adjust code based on where files are located
+```{r}
+fish2022 <- read.csv("data/integrated_wq_totalcatch_nk.csv")
+# 1998 - WY2022 fish data compiled from Nicole (Nov. 2022) (with trap effort and seine volume)  Nicole already took out any gear condition codes > 2
+
+pre2010 <- read.csv("data/Pre2010_MonthlyTrapEffort.csv")
+# prior to 2010, trap effort was not recorded clearly in the database. Cat and Nicole hand calculated the monthly trap effort for 1998 to 2009.
+
+WY <- read.csv("data/Water_year.csv")
+# Water year (October - September) conversions 
+```
+
+# Fish dataset: combine data down to month, keep discrete data for stats later
+```{r}
+# Add in year and month columns to fish datasheet
+fish <- fish2022 %>%
+  mutate_at(vars(SampleDate), funs(year, month))
+
+# Nicole already made sure there were zero counts for species not caught for each eventID. So we can go ahead and combine everything by month (take the sum of Count, seine volume, and trap hours and the Mean for each of the discrete water quality variables).
+
+fishsp.mo <- fish %>%
+  group_by(year, month, 
+           MethodCode, StationCode, OrganismCode) %>% 
+  summarize("mo.count"= sum(Count, na.rm = TRUE), 
+            "mo.vol"=sum(SeineVolume, na.rm = TRUE), 
+            "mo.eff"=sum(TrapHours, na.rm = TRUE),
+            "mo.temp" = mean(WaterTemp, na.rm = TRUE),
+            "mo.spc" = mean(SpecificConductance, na.rm = TRUE),
+            "mo.con" = mean(Conductivity, na.rm = TRUE),
+            "mo.turb" = mean(Turbidity, na.rm = TRUE),
+            "mo.do" = mean(DO, na.rm = TRUE),
+            "mo.pH" = mean(pH, na.rm = TRUE),
+            "mo.secchi" = mean(Secchi, na.rm = TRUE)) 
+
+# Once we have everything summed/averaged per month:
+##############################
+# Dataset 1 = Beach Seine Data
+BeachSeine <- fishsp.mo %>%
+  filter(MethodCode == "BSEIN") %>%
+  rename("effort" = "mo.vol") %>%
+  select(!(mo.eff))
+##############################
+# Dataset 2 = Fyke and Rotary Screw trap
+Traps <- fishsp.mo %>%
+  filter(MethodCode == "FKTR"| 
+           MethodCode == "RSTR") %>%
+  rename("effort" = "mo.eff") %>%
+  select(!(mo.vol))
+
+# Dataset 2: Break apart into fish data and effort data for trap data set
+fishdata <- Traps[c(1:6, 8:14)] # everything but effort
+effdata <- Traps %>%
+  select(c(year:OrganismCode, effort)) %>%
+  filter(year >= 2010)
+
+# Edit pre2010 data set to match columns for effort data
+pre2010my <- pre2010 %>%
+  mutate(Date = ymd(Date)) %>%
+  mutate_at(vars(Date), funs(year, month)) %>%
+  rename("effort" = "OpHours")%>%
+  select(year, month, MethodCode, effort)
+
+## Add a column for OrganismCode to the pre2010my by making a new fishdat.sp with the full species pre-2010 and no count column
+fishdata2 <- Traps %>%
+  filter(year < 2010) %>%
+  select(year:OrganismCode)
+## And then merge it together with pre2010my to add back effort column
+pre2010my.sp <- 
+  merge(pre2010my, fishdata2, 
+        by= c('year', 'month', 'MethodCode'))
+
+# Add trap effort together
+Trapeffort <- rbind(pre2010my.sp, effdata)
+
+# Add effort to fish data
+Traps.cpue <- left_join(Trapeffort, fishdata) #Problems with 1998, but I'm not going to use any data pre2000, so it's fine for now
+
+# Calculate CPUE
+Traps.cpue$CPUE <- as.numeric(Traps.cpue$mo.count/Traps.cpue$effort)
+Traps.cpue$Date <- paste(Traps.cpue$year, Traps.cpue$month, sep="-") %>%
+  ym() %>% 
+  as.Date()
+#############################
+BeachSeine$CPUE <- as.numeric(BeachSeine$mo.count/BeachSeine$effort)
+BeachSeine$Date <- paste(BeachSeine$year, BeachSeine$month, sep="-") %>%
+  ym() %>% 
+  as.Date()
+
+# Just Checking
+BeachSeine.HCH <- BeachSeine %>%
+  filter(OrganismCode == "HCH") 
+
+# It isn't helpful to look at beach seines separated by site, so add them all together and redo CPUE
+BeachSeine.sum <- BeachSeine %>%
+  group_by(year, month, 
+           MethodCode, OrganismCode) %>% 
+  summarize("all.count"= sum(mo.count, na.rm = TRUE), 
+            "all.effort"=sum(effort, na.rm = TRUE),
+            "mmo.temp" = mean(mo.temp, na.rm = TRUE),
+            "mmo.spc" = mean(mo.spc, na.rm = TRUE),
+            "mmo.con" = mean(mo.con, na.rm = TRUE),
+            "mmo.turb" = mean(mo.turb, na.rm = TRUE),
+            "mmo.do" = mean(mo.do, na.rm = TRUE),
+            "mmo.pH" = mean(mo.pH, na.rm = TRUE),
+            "mmo.secchi" = mean(mo.secchi, na.rm = TRUE)) 
+
+BeachSeine.sum$CPUE <- as.numeric(BeachSeine.sum$all.count/BeachSeine.sum$all.effort)
+BeachSeine.sum$Date <- paste(BeachSeine.sum$year, BeachSeine.sum$month, sep="-") %>%
+  ym() %>% 
+  as.Date()
+
+BeachSeine.moHCH <- BeachSeine.sum %>%
+  filter(OrganismCode == "HCH") 
+
+HCH.BS.mo.all <- 
+  ggplot(BeachSeine.moHCH, aes(x=Date, y=CPUE)) + 
+  geom_line() + geom_point() + theme_bw() + 
+  labs(title = "Beach Seine Hitch CPUE, all sites combined", 
+       x = "Date", 
+       y = "Catch Per Unit Effort (CPUE)")
+ggplotly(HCH.BS.mo.all)
+# Thats better...but now both data sets need water year as a column
+
+# Dataset 1 = Beach Seine Data - adding water year
+BeachSeine.mo.WY <- merge(BeachSeine.sum, WY, by= c('year', 'month'))
+
+# To get answers about HCH totals
+BS.HCH.mo.WY <- BeachSeine.mo.WY %>%
+  filter(Water_year >= 2000) %>%
+  filter(Water_year <= 2022) %>%
+  filter(OrganismCode == "HCH")
+
+BS.mo.WY.plot <- 
+  ggplot(BS.HCH.mo.WY, aes(x=Date, y=CPUE)) + facet_wrap(~MethodCode) + 
+  geom_point(size = 0.5) + geom_line()+ theme_bw() + 
+  labs(title = "Beach Seine Hitch CPUE, all sites combined", 
+       x = "Date", 
+       y = "Catch Per Unit Effort (CPUE)")
+ggplotly(BS.mo.WY.plot)
+
+bshchyrcount <- BS.HCH.mo.WY %>% group_by(Water_year, MethodCode) %>% summarize("yr.count" = sum(all.count, na.rm = TRUE))
+View(bshchyrcount)
+# BS total count = 376 (68% of total 551 caught in 22 years)
+# BS count 2019-2022 = 273 (50% of all 551 caught in 22 years)
+
+#  Dataset 2 = Fyke and Rotary Screw trap - adding Water year column
+Traps.mo.WY <- merge(Traps.cpue, WY, by= c('year', 'month'))
+
+# To get answers about HCH totals
+Traps.HCH.mo.WY <- Traps.mo.WY %>%
+  filter(Water_year >= 2000) %>%
+  filter(Water_year <= 2022) %>%
+  filter(OrganismCode == "HCH")
+
+Traps.mo.WY.plot <- 
+  ggplot(Traps.HCH.mo.WY, aes(x=Date, y=CPUE)) + 
+  geom_point(size=1) + geom_line() + theme_bw() + facet_wrap(~MethodCode, ncol = 1) +
+  labs(title = "Traps Hitch CPUE, all sites combined", 
+       x = "Date", 
+       y = "Catch Per Unit Effort (CPUE)")
+ggplotly(Traps.mo.WY.plot)
+
+traphchyrcount <- Traps.HCH.mo.WY %>% group_by(Water_year, MethodCode) %>% summarize("yr.count" = sum(mo.count, na.rm = TRUE))
+View(traphchyrcount)
+# Fyke total count = 128 (23% of total 551 caught)
+# RSTR total count = 47 (9% of total 551 caught)
+# Fyke count 2019 - 2022 = 105 (19% of total 551 caught)
+# RSTR count 2019 - 2022 = 14 (3% of total 551 caught)
+```
+
+# HCH Count by Water Year
+```{r} 
+# Data Set 1 : Beach seine count data. Start with BS.HCH.mo.WY data set since that already has WY and summed by month 
+
+BS.HCH.mo.WY$MethodCode <- factor(BS.HCH.mo.WY$MethodCode)
+
+BS.HCH.mo.WY$MethodCode <- 
+  recode(BS.HCH.mo.WY$MethodCode, 
+         "BSEIN" = "Beach Seine")
+
+HCHBScountplot <- 
+  ggplot(BS.HCH.mo.WY, aes(x=Water_year, y=all.count, fill = MethodCode)) + 
+  geom_bar(position='stack', stat='identity') +
+  facet_wrap(~MethodCode, ncol = 1, scales = "free_y") + 
+  scale_fill_manual(values=c("#0072B2","#009E73", "#CC79A7")) + 
+  theme_bw() + 
+  labs(title = "Hitch Count by Gear Type", 
+#       x = "Water Year (Oct. - Sept.)", 
+       y = "Count", 
+       fill = "Sampling Location") +
+  scale_x_continuous(breaks = 2000:2022) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())+
+  theme(legend.position = "none")
+
+
+# DataSet 2: Traps count data. Work with Traps.HCH.mo.WY 
+Traps.HCH.mo.WY$MethodCode <- factor(Traps.HCH.mo.WY$MethodCode)
+
+Traps.HCH.mo.WY$MethodCode <- 
+  recode(Traps.HCH.mo.WY$MethodCode, 
+         "FKTR" = "Fyke Trap", 
+         "RSTR" = "Rotary Screw Trap")
+
+Fyke.HCH.mo.WY <- Traps.HCH.mo.WY %>%
+  filter(MethodCode == "Fyke Trap")
+
+HCHtrapcountplot <- 
+  ggplot(Fyke.HCH.mo.WY, aes(x=Water_year, y=mo.count, fill = MethodCode)) + 
+  geom_bar(position='stack', stat='identity') +
+  facet_wrap(~MethodCode, ncol = 1) + 
+  scale_fill_manual(values=c("#009E73", "#CC79A7")) + 
+  theme_bw() + 
+  labs(# x = "Water Year (Oct. - Sept.)", 
+       y = "Count", 
+       fill = "Sampling Location") +
+  scale_x_continuous(breaks = 2000:2022) +
+  ylim(0, 100) +
+  theme(axis.title.x=element_blank()) +
+  theme(legend.position = "none")
+
+
+both <- ggarrange(HCHBScountplot, HCHtrapcountplot, 
+          ncol = 1, nrow = 2, label.y = "Count")
+
+ggsave(both, file="plots/hitch count.png", scale=2)
+```
+
+# Hitch CPUE BY Water Year
+```{r}
+## SUM to Year AFTER adding in the pre2010 data
+
+# 2 different data sets
+View(BS.HCH.mo.WY)
+View(Traps.HCH.mo.WY)
+
+# start with BS
+# THEN we SUM count and Effort for the YEAR, based on WATER YEAR for each dataset
+WY.BS.HCH <- BS.HCH.mo.WY %>%
+  group_by(Water_year, MethodCode) %>% 
+  summarize("yr.count"= sum(all.count, na.rm = TRUE), 
+            "yr.effort"=sum(all.effort, na.rm = TRUE))
+  
+# Now we calculate CPUE based on water year
+WY.BS.HCH$CPUE <- as.numeric(WY.BS.HCH$yr.count/WY.BS.HCH$yr.effort)
+
+# Next do Traps
+WY.Traps.HCH <- Traps.HCH.mo.WY %>%
+  group_by(Water_year, MethodCode) %>% 
+  summarize("yr.count"= sum(mo.count, na.rm = TRUE), 
+            "yr.effort"=sum(effort, na.rm = TRUE))
+  
+# Now we calculate CPUE based on water year
+WY.Traps.HCH$CPUE <- as.numeric(WY.Traps.HCH$yr.count/WY.Traps.HCH$yr.effort)
+
+# We can merge these together for final plot
+WY.all3.HCH <- rbind(WY.BS.HCH, WY.Traps.HCH)
+
+WY.BS.Fyke.HCH <- WY.all3.HCH %>%
+  filter(MethodCode != "Rotary Screw Trap")
+
+BS.hitch.yr.plot <- 
+  ggplot(WY.BS.Fyke.HCH, aes(x=Water_year, y=CPUE, color = MethodCode)) + 
+  geom_line(size = 1) + geom_point() + 
+  facet_wrap(~MethodCode, ncol = 1, scales = "free_y") +
+  scale_color_manual(values=c("#0072B2","#009E73", "#CC79A7")) + theme_bw() + 
+  labs(title = "Hitch Catch per Unit Effort by Gear Type", 
+       x = "Water Year (Oct. - Sept.)", 
+       y = "Catch Per Unit Effort (CPUE)") +
+  scale_x_continuous(breaks = 2000:2022)+ 
+  theme(legend.position="none")
+
+ggsave(BS.hitch.yr.plot, file="plots/hitch cpue.png", scale=2)
+```
+
+# Cyprinid comparisons (and a few other fish)
+```{r}
+## Starting point for plots (end of last section, before sub-setting for HCH)
+# Dataset 1 : BeachSeine.mo.WY
+# Dataset 2: Traps.mo.WY
+
+# Start with Cyprinids plot: Hitch (HCH), Sac Blackfish (SCB), Sac Sucker (SASU), and Golden Shiner (GSN)
+
+# Beach Seine Cyprinids
+BS.Cyps <- BeachSeine.mo.WY %>%
+  filter(Water_year >= 2000) %>%
+  filter(Water_year <= 2022) %>%
+  filter(OrganismCode == "HCH" |
+           OrganismCode == "GSN" |
+           OrganismCode == "SCB" |
+           OrganismCode == "SASU")
+
+BS.Cyps.WY <- BS.Cyps %>%
+  group_by(Water_year, MethodCode, OrganismCode) %>% 
+  summarize("yr.count"= sum(all.count, na.rm = TRUE), 
+            "yr.effort"=sum(all.effort, na.rm = TRUE))
+  
+# Now we calculate CPUE based on water year
+BS.Cyps.WY$CPUE <- as.numeric(BS.Cyps.WY$yr.count/BS.Cyps.WY$yr.effort)
+
+# Trap Cyprinids - only want Fyke -- Presentation decision to not include RSTR
+Trap.Cyps <- Traps.mo.WY %>%
+  filter(Water_year >= 2000) %>%
+  filter(Water_year <= 2022) %>%
+  filter(OrganismCode == "HCH" |
+           OrganismCode == "GSN" |
+           OrganismCode == "SCB" |
+           OrganismCode == "SASU") %>%
+  filter(MethodCode == "FKTR")
+
+Traps.Cyps.WY <- Trap.Cyps %>%
+  group_by(Water_year, MethodCode, OrganismCode) %>% 
+  summarize("yr.count"= sum(mo.count, na.rm = TRUE), 
+            "yr.effort"=sum(effort, na.rm = TRUE))
+  
+# Now we calculate CPUE based on water year
+Traps.Cyps.WY$CPUE <- as.numeric(Traps.Cyps.WY$yr.count/Traps.Cyps.WY$yr.effort)
+
+# We can merge these together for final plot
+Cyps.allgear <- rbind(BS.Cyps.WY, Traps.Cyps.WY)
+
+# Make OrganismCode a Factor, so I can order them how i want for the plot
+Cyps.allgear$OrganismCode <- factor(Cyps.allgear$OrganismCode,levels = 
+                                      c("HCH", "SCB", "SASU", "GSN"))
+Cyps.allgear$OrganismCode <- 
+  recode(Cyps.allgear$OrganismCode, 
+         "HCH" = "Hitch", 
+         "SCB" = "Sacramento Blackfish",
+         "SASU" = "Sacramento Sucker",
+         "GSN" = "Golden Shiner",)
+
+# Method Code too
+Cyps.allgear$MethodCode <- factor(Cyps.allgear$MethodCode)
+
+Cyps.allgear$MethodCode <- 
+  recode(Cyps.allgear$MethodCode, 
+         "BSEIN" = "Beach Seine", 
+         "FKTR" = "Fyke Trap")
+
+Cyps.Plot <- 
+  ggplot(Cyps.allgear, aes(x=Water_year, y=CPUE, fill = OrganismCode)) + 
+  facet_wrap(OrganismCode~MethodCode, ncol = 2, nrow = 4, scales = "free_y") +
+  geom_bar(position='stack', stat='identity') + theme_bw() +  
+  theme(legend.position = "top") +
+  scale_y_continuous(n.breaks = 3,
+                     labels = scales::number_format(accuracy = 0.001)) +
+  labs(#title = "Cyprinids in the Yolo Bypass", 
+       #subtitle = "Beach Seine and Fyke Trap Methods", 
+       x = "Water Year (Oct. - Sept.)") +
+  theme(axis.title.y=element_blank()) +
+      # y = "Catch Per Unit Effort (CPUE)") +
+  theme(strip.background = element_blank(), strip.text.x = element_blank())
+ggplotly(Cyps.Plot)
+
+
+# Plot just Hitch and Sacramento Blackfish 
+BS.HCH.SCB.WY <- BS.Cyps.WY %>%
+  filter(OrganismCode == "HCH" |
+         OrganismCode == "SCB")
+
+BS.HCH.SCB.WY$OrganismCode <- factor(BS.HCH.SCB.WY$OrganismCode)
+
+BS.HCH.SCB.WY$OrganismCode <- 
+  recode(BS.HCH.SCB.WY$OrganismCode, 
+         "HCH" = "Hitch", 
+         "SCB" = "Sacramento Blackfish")
+
+BS.HCH.SCB.WY.plot <- 
+  ggplot(BS.HCH.SCB.WY, aes(x=Water_year, y=CPUE, fill = OrganismCode)) + 
+  geom_bar(position = "dodge", stat = "identity") + theme_bw() + 
+  theme(legend.position = c(0.65, 0.85),
+        legend.title = element_blank(),
+        axis.title.y=element_blank(),
+        axis.title.x=element_blank()) +
+  scale_fill_manual(values=c("#F8766D", "#7CAE00"))
+#  labs(title = "Beach Seine HCH vs. SCB CPUE",
+#       x = "Water Year (Oct. - Sept.)", 
+#       y = "Catch Per Unit Effort (CPUE)")
+
+ggsave(BS.HCH.SCB.WY.plot, file="plots/hitch blackfish.png")
+
+# For comparison, I want to plot Killifish vs. Mosquitofish
+BS.KLF.mo.WY <- BeachSeine.mo.WY %>%
+  filter(Water_year >= 2000) %>%
+  filter(Water_year <= 2022) %>%
+  filter(OrganismCode == "KLF" |
+           OrganismCode == "RFK" |
+           OrganismCode == "MQF") %>%
+  filter(CPUE < 1) 
+
+BS.KLF.mo.WY.plot <- 
+  ggplot(BS.KLF.mo.WY, aes(x=Date, y=CPUE, color = OrganismCode)) + 
+  geom_point(size = 0.4) + theme_bw() + 
+  labs(title = "Beach Seine Killifish CPUE, all sites combined",
+       subtitle = "Beach Seine", 
+       x = "Water Year (Oct. - Sept.)", 
+       y = "Catch Per Unit Effort (CPUE)")
+ggplotly(BS.KLF.mo.WY.plot)
+
+# Need to make all RFK labeled as KLF
+BS.KLF.mo.WY$OrganismCode <- 
+  recode(BS.KLF.mo.WY$OrganismCode, 
+         "RFK" = "KLF")
+
+BS.KLF.WY <- BS.KLF.mo.WY %>%
+  group_by(Water_year, MethodCode, OrganismCode) %>% 
+  summarize("yr.count"= sum(all.count, na.rm = TRUE), 
+            "yr.effort"=sum(all.effort, na.rm = TRUE))
+
+BS.KLF.WY$CPUE <- as.numeric(BS.KLF.WY$yr.count/BS.KLF.WY$yr.effort)
+
+BS.KLF.WY$OrganismCode <- 
+  recode(BS.KLF.WY$OrganismCode, 
+         "KLF" = "Killifish",
+         "MQF" = "Mosquitofish")
+
+BS.KLF.WY.plot <- 
+  ggplot(BS.KLF.WY, aes(x=Water_year, y=CPUE, fill = OrganismCode)) + 
+  geom_bar(position = "dodge", stat = "identity") + theme_bw() + 
+  theme(legend.position = c(0.65, 0.85),
+        legend.title = element_blank(),
+        axis.title.y=element_blank(),
+        axis.title.x=element_blank()) +
+  scale_fill_manual(values=c("#E69F00", "#0072B2"))
+#  labs(title = "Beach Seine Killifish vs. Mosquitofish CPUE", 
+#       x = "Water Year (Oct. - Sept.)", 
+#       y = "Catch Per Unit Effort (CPUE)")
+ggplotly(BS.KLF.WY.plot)
+
+ggsave(BS.KLF.WY.plot, file="plots/killifish.png")
+```
+
+## Discrete data
+```{r}
+WQ.daily <- fish %>%
+  group_by(EventID,StationCode, MethodCode, SampleDate, year, month) %>%
+  summarize("dayWaterTemp"= mean(WaterTemp, na.rm = TRUE), 
+            "daySpecificConductance" = mean(SpecificConductance, na.rm = TRUE), 
+            "dayTurbidity" = mean(Turbidity, na.rm = TRUE),
+            "dayDO" = mean(DO, na.rm = TRUE),
+            "daypH" = mean(pH, na.rm = TRUE),
+            "daySecchi" = mean(Secchi, na.rm = TRUE))
+
+WQ.mo <- WQ.daily %>%
+  group_by(StationCode, MethodCode, year, month) %>%
+  summarize("mo.turb" = mean(dayTurbidity, na.rm = TRUE),
+            "mo.secchi" = mean(daySecchi, na.rm = TRUE),
+            "mo.temp"= mean(dayWaterTemp, na.rm = TRUE))
+
+WQ.mo$Date <- paste(WQ.mo$year, WQ.mo$month, sep="-") %>%
+  ym() %>% 
+  as.Date()
+
+WQ.plot <- 
+  ggplot(WQ.mo, aes(x= Date, y = mo.turb)) +  
+  geom_point(size = 1) + 
+  facet_wrap(~MethodCode, ncol = 1) + theme_bw() + 
+  labs(title = "YBFMP Beach Seine Discrete Turbidity",
+       subtitle = "Averaged by month",
+       x = "Date",
+       y = "Turbidity (NTU)") +
+  geom_smooth (method=lm)
+ggplotly(WQ.plot)
+
+# Remove Outlier (not really an outlier, but it's one value from YBI80 during overtopping which is throwing off the rest of the plot) and Screw trap
+WQ.mo2 <- WQ.mo %>%
+  filter(year >= 2010) %>%
+  filter(mo.turb <=400) %>%
+  filter(MethodCode == "BSEIN" |
+           MethodCode == "FKTR")
+
+# Need to make MethodCode a factor too so the graph shows better names
+WQ.mo2$MethodCode <- factor(WQ.mo2$MethodCode)
+
+WQ.mo2$MethodCode <- 
+  recode(WQ.mo2$MethodCode, 
+         "BSEIN" = "Beach Seine", 
+         "FKTR" = "Fyke Trap")
+
+# Turbidity plot
+WQ.plot.turb2 <- 
+  ggplot(WQ.mo2, aes(x= Date, y = mo.turb)) +  
+  geom_point(size = 1) + 
+  facet_wrap(~MethodCode, ncol = 1) + theme_bw() + 
+  labs(title = "YBFMP Discrete Turbidity",
+       subtitle = "Average Value per Month",
+       x = "Date",
+       y = "Turbidity (NTU)") +
+  geom_smooth (method=lm)
+
+ggsave(WQ.plot.turb2, file="plots/turbidity.png")
+
+# Secchi plot
+WQ.mo.secchi <- WQ.mo %>%
+  filter(MethodCode == "BSEIN" |
+           MethodCode == "FKTR")
+
+WQ.mo.secchi$MethodCode <- factor(WQ.mo.secchi$MethodCode)
+
+WQ.mo.secchi$MethodCode <- 
+  recode(WQ.mo.secchi$MethodCode, 
+         "BSEIN" = "Beach Seine", 
+         "FKTR" = "Fyke Trap")
+
+WQ.secchi.plot <- 
+  ggplot(WQ.mo.secchi, aes(x= Date, y = mo.secchi)) +  
+  geom_point(size = 1) + 
+  facet_wrap(~MethodCode, ncol = 1) + theme_bw() + 
+  labs(title = "YBFMP Discrete Secchi Depth",
+       subtitle = "Average Value per month",
+       x = "Date",
+       y = "Secchi Depth (mm)") +
+  geom_smooth (method=lm)
+
+ggsave(WQ.secchi.plot, file="plots/secchi.png")
+```
+
+# Statistics
+```{r}
+# Dataset 1: BS.HCH.mo.WY
+# Dataset 2: Traps.HCH.mo.WY
+library(MASS)
+library(DHARMa)
+library(glmmTMB)
+library(lmtest)
+library(pscl)
+library(visreg)
+library(effects)
+
+hist(BS.HCH.mo.WY$CPUE)
+# thats a lot of zero data...
+
+# Discrete data:
+# run a simple linear regression
+hist(WQ.mo2$mo.turb)
+plot(mo.turb ~ Date, data = WQ.mo2)
+mo.turb.lm <-lm(mo.turb~Date, data = WQ.mo2)
+summary(mo.turb.lm)
+#Call:
+#lm(formula = mo.turb ~ Date, data = WQ.mo2)
+
+#Residuals:
+#    Min      1Q  Median      3Q     Max 
+#-62.041 -17.627  -5.133   7.039 277.308 
+
+#Coefficients:
+#              Estimate Std. Error t value Pr(>|t|)    
+#(Intercept)  3.507e+02  1.665e+01   21.06   <2e-16 ***
+#Date        -1.744e-02  9.609e-04  -18.15   <2e-16 ***
+#---
+#Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+#Residual standard error: 33.6 on 1019 degrees of freedom
+#Multiple R-squared:  0.2444,	Adjusted R-squared:  0.2436 
+#F-statistic: 329.5 on 1 and 1019 DF,  p-value: < 2.2e-16
+
+## Hmmm, actually maybe I should run separately for each gear type
+
+WQ.mo.bs <- WQ.mo2 %>%
+  filter(MethodCode == "Beach Seine")
+hist(WQ.mo.bs$mo.turb)
+plot(mo.turb ~ Date, data = WQ.mo.bs)
+mo.turb.bs.lm <-lm(mo.turb~Date, data = WQ.mo.bs)
+summary(mo.turb.bs.lm)
+# Call:
+# lm(formula = mo.turb ~ Date, data = WQ.mo.bs)
+# 
+# Residuals:
+#     Min      1Q  Median      3Q     Max 
+# -62.136 -18.718  -4.722   7.757 277.424 
+# 
+# Coefficients:
+#               Estimate Std. Error t value Pr(>|t|)    
+# (Intercept) 352.565593  17.943314   19.65   <2e-16 ***
+# Date         -0.017555   0.001035  -16.96   <2e-16 ***
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+# Residual standard error: 34.24 on 918 degrees of freedom
+# Multiple R-squared:  0.2386,	Adjusted R-squared:  0.2377 
+# F-statistic: 287.6 on 1 and 918 DF,  p-value: < 2.2e-16
+
+
+WQ.mo.fyke <- WQ.mo2 %>%
+  filter(MethodCode == "Fyke Trap")
+hist(WQ.mo.fyke$mo.turb)
+plot(mo.turb ~ Date, data = WQ.mo.fyke)
+mo.turb.fyke.lm <-lm(mo.turb~Date, data = WQ.mo.fyke)
+summary(mo.turb.fyke.lm)
+# Call:
+# lm(formula = mo.turb ~ Date, data = WQ.mo.fyke)
+# 
+# Residuals:
+#     Min      1Q  Median      3Q     Max 
+# -46.482 -12.771  -6.729   3.830 148.352 
+# 
+# Coefficients:
+#               Estimate Std. Error t value Pr(>|t|)    
+# (Intercept) 334.390758  41.739673   8.011 2.27e-12 ***
+# Date         -0.016475   0.002414  -6.823 7.17e-10 ***
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+# Residual standard error: 27.36 on 99 degrees of freedom
+# Multiple R-squared:  0.3199,	Adjusted R-squared:  0.313 
+# F-statistic: 46.56 on 1 and 99 DF,  p-value: 7.171e-10
+
+
+#Secchi depth
+WQ.mo.secchiBS <- WQ.mo.secchi %>%
+  filter(MethodCode == "Beach Seine")
+hist(WQ.mo.secchiBS$mo.secchi)
+plot(mo.secchi ~ Date, data = WQ.mo.secchiBS)
+mo.secchi.BS.lm <-lm(mo.secchi~Date, data = WQ.mo.secchiBS)
+summary(mo.secchi.BS.lm)
+
+WQ.mo.secchifyke <- WQ.mo.secchi %>%
+  filter(MethodCode == "Fyke Trap")
+hist(WQ.mo.secchifyke$mo.secchi)
+plot(mo.secchi ~ Date, data = WQ.mo.secchifyke)
+mo.secchi.fyke.lm <-lm(mo.secchi~Date, data = WQ.mo.secchifyke)
+summary(mo.secchi.fyke.lm)
+```
+
