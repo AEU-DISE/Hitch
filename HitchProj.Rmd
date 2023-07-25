@@ -1,6 +1,6 @@
 ---
 title: "IEP 2023 Presentation. Hitch: YBFMP's Minnow on the Rise"
-author: "Emily"
+author: "Emily & Nicole"
 date: '2023-03-01 '
 editor_options: 
   chunk_output_type: console
